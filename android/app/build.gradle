@@ -1,0 +1,67 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = 'pt.ptgdroid'
+    compileSdk = 36
+    ndkVersion = '30.0.16248370'
+
+    defaultConfig {
+        applicationId = 'pt.ptgdroid'
+        minSdk = 24
+        targetSdk = 36
+        versionCode = 1
+        versionName = '0.1'
+        // The runtime reserves a 4 GiB guest address space: 64-bit only.
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake {
+                // Recompiled game code is only linked if you generated it from your own copy
+                // (see README); -PinterpOnly forces the interpreter-only build used for releases.
+                def recompiled = !project.hasProperty('interpOnly') &&
+                        file('../../generated/app/dispatch_table.c').exists()
+                arguments '-DANDROID_STL=c++_static', "-DPTG_RECOMPILED=${recompiled ? 'ON' : 'OFF'}"
+            }
+        }
+    }
+
+    // Release signing: set ptgKeystore, ptgKeystorePassword, ptgKeyAlias and ptgKeyPassword in
+    // ~/.gradle/gradle.properties (never in this repository). Without them the release APK is
+    // signed with the local debug key, which is fine for personal builds.
+    signingConfigs {
+        release {
+            if (project.hasProperty('ptgKeystore')) {
+                storeFile = file(project.property('ptgKeystore'))
+                storePassword = project.property('ptgKeystorePassword')
+                keyAlias = project.property('ptgKeyAlias')
+                keyPassword = project.property('ptgKeyPassword')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = false
+            signingConfig = project.hasProperty('ptgKeystore') ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file('../../CMakeLists.txt')
+            version = '4.1.2'
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDir '../../third_party/SDL/android-project/app/src/main/java'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+}

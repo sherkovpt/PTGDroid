@@ -1,0 +1,31 @@
+# Your own game files (never commit them)
+/game/
+*.pak
+*.app
+*.zip
+
+# Generated from the game binary by recomp/armrecomp.py and the analysis tools
+/generated/
+/analysis/
+
+# Build output
+/build/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+*.apk
+*.aab
+*.log
+__pycache__/
+
+# Runtime data (desktop builds)
+userdata_c/
+frame_*.bmp
+dump_*.bmp
+shot.bmp
+
+# Signing keys
+*.jks
+*.keystore
