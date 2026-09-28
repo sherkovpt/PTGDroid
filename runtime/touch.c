@@ -1,6 +1,7 @@
 /* On-screen N-Gage controls for touch screens: 8-way d-pad (centre = select), soft keys, C and
  * the 0-9 * # keypad. Multi-touch; each finger holds one control and may slide across the d-pad. */
 #include "touch.h"
+#include "font.h"
 #include <math.h>
 #include <string.h>
 
@@ -178,30 +179,10 @@ int touch_event(const SDL_Event *e, int w, int h) {
 }
 
 /* ---- drawing ---- */
-static const uint8_t font[][8] = {
-    { '0', 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E }, { '1', 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E },
-    { '2', 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F }, { '3', 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E },
-    { '4', 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, { '5', 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E },
-    { '6', 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E }, { '7', 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
-    { '8', 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E }, { '9', 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C },
-    { '*', 0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00 }, { '#', 0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A },
-    { 'C', 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E }, { '-', 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 },
-};
-
 static void draw_char(SDL_Renderer *r, char ch, SDL_Rect box) {
-    for (size_t g = 0; g < sizeof font / sizeof font[0]; g++) {
-        if (font[g][0] != ch) continue;
-        int px = box.h / 14;
-        if (px < 1) px = 1;
-        int ox = box.x + (box.w - 5 * px) / 2, oy = box.y + (box.h - 7 * px) / 2;
-        for (int row = 0; row < 7; row++)
-            for (int col = 0; col < 5; col++)
-                if (font[g][1 + row] & (0x10 >> col)) {
-                    SDL_Rect p = { ox + col * px, oy + row * px, px, px };
-                    SDL_RenderFillRect(r, &p);
-                }
-        return;
-    }
+    int px = box.h / 14;
+    if (px < 1) px = 1;
+    font_char(r, ch, box.x + (box.w - 5 * px) / 2, box.y + (box.h - 7 * px) / 2, px);
 }
 
 static void fill(SDL_Renderer *r, SDL_Rect b, int pressed) {

@@ -45,6 +45,20 @@ in both and registers, flags and memory are compared.
 3. Open PTGDroid and select the ZIP. The files are copied into the app's private storage; this is
    only needed once. Saved games and settings are also kept in the app's storage.
 
+### Menu and video filters
+
+A menu is shown before the game starts and whenever you press **Back** on Android (Escape on the
+desktop, Guide on a gamepad); opening it pauses the game. It lets you choose:
+
+- **Filter** – how the 176×208 screen is scaled up:
+  - *Pixel perfect*: nearest-neighbour scaling.
+  - *Sharp*: integer upscale followed by bilinear filtering (crisp pixels without uneven sizes).
+  - *Smooth*: Scale2x applied twice, which rounds diagonal edges of the pixel art.
+  - *LCD*: a screen-grid effect.
+- **Touch controls** – on/off (turn them off when playing with a gamepad or keyboard).
+
+Settings are saved and restored on the next launch.
+
 ### Controls
 
 | N-Gage | Touch | Keyboard (desktop) | Gamepad |

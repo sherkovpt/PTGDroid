@@ -6,8 +6,14 @@
 #include <SDL.h>
 #include "hle.h"
 #include "touch.h"
+#include "menu.h"
+#include "video.h"
 #include <stdlib.h>
 #include <math.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
@@ -145,7 +151,8 @@ static void touch_send(uint32_t scan, uint32_t code, int down) { input_key(down,
 
 /* Test hook: PTG_SCRIPT="ms:key,ms:key,..." taps keys (120 ms) at times since start.
  * Keys: up down left right select softl softr star hash c 0-9; "blur"/"focus" change window focus. */
-typedef struct { uint32_t at; NKey key; int released; int focus; /* 1 gain, 2 lose */ } Tap;
+typedef struct { uint32_t at; NKey key; int released; int focus; /* 1 gain, 2 lose, 3 menu, 4 resume */ } Tap;
+static int script_menu_request; /* 1 open pause menu, 2 close it */
 static Tap taps[64];
 static int ntaps;
 static void parse_script(const char *s) {
@@ -160,7 +167,7 @@ static void parse_script(const char *s) {
         else if (!strcmp(name, "softr")) k = K_SOFT_R; else if (!strcmp(name, "star")) k = K_STAR;
         else if (!strcmp(name, "hash")) k = K_HASH; else if (!strcmp(name, "c")) k = K_C;
         else if (name[0] >= '0' && name[0] <= '9' && !name[1]) k = digit(name[0] - '0');
-        int focus = !strcmp(name, "focus") ? 1 : (!strcmp(name, "blur") ? 2 : 0);
+        int focus = !strcmp(name, "focus") ? 1 : !strcmp(name, "blur") ? 2 : !strcmp(name, "menu") ? 3 : !strcmp(name, "resume") ? 4 : 0;
         taps[ntaps++] = (Tap){ ms, k, 0, focus };
         s = strchr(s, ',');
         if (s) s++;
@@ -169,8 +176,9 @@ static void parse_script(const char *s) {
 static void run_script(uint32_t now) {
     for (int i = 0; i < ntaps; i++) {
         if (taps[i].focus && !taps[i].released && now >= taps[i].at) {
-            LOG("script: %s", taps[i].focus == 1 ? "focus" : "blur");
-            input_focus(taps[i].focus == 1);
+            LOG("script: action %d", taps[i].focus);
+            if (taps[i].focus >= 3) script_menu_request = taps[i].focus - 2;
+            else input_focus(taps[i].focus == 1);
             taps[i].released = 2;
             continue;
         }
@@ -189,6 +197,9 @@ static void run_script(uint32_t now) {
 int main(int argc, char **argv) {
 #ifndef __ANDROID__
     SDL_SetMainReady();
+#endif
+#ifdef __ANDROID__
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1"); /* back opens the menu */
 #endif
 #ifdef _WIN32
     timeBeginPeriod(1); /* 1 ms timer resolution: the game paces itself with short RTimer waits */
@@ -209,9 +220,8 @@ int main(int argc, char **argv) {
     if (!load_image(argv[1])) { LOG("cannot load %s", argv[1]); return 1; }
     hle_bind();
 
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
 #ifdef __ANDROID__
-    /* immersive (no status/navigation bars); resizable + hint so SDL doesn't lock the orientation */
+    /* immersive (no status/navigation bars); resizable + hint so SDL keeps all orientations */
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait PortraitUpsideDown LandscapeLeft LandscapeRight");
     Uint32 win_flags = SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #else
@@ -219,9 +229,10 @@ int main(int argc, char **argv) {
 #endif
     SDL_Window *win = SDL_CreateWindow("PTGDroid", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        W * 3, H * 3, win_flags);
-    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC |
+                                                    SDL_RENDERER_TARGETTEXTURE);
     if (!win || !ren) { LOG("SDL window/renderer: %s", SDL_GetError()); return 1; }
-    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB444, SDL_TEXTUREACCESS_STREAMING, W, H);
+    video_init(ren);
 
     fb_lock = SDL_CreateMutex();
     g_display_submit = submit;
@@ -232,28 +243,107 @@ int main(int argc, char **argv) {
     g_audio.close = sdl_audio_close;
     if (getenv("PTG_DUMP")) dump_every = atoi(getenv("PTG_DUMP"));
     parse_script(getenv("PTG_SCRIPT"));
-    uint32_t t0 = SDL_GetTicks();
-    SDL_CreateThreadWithStackSize(game_thread, "guest", 8 << 20, NULL);
-
-#ifdef __ANDROID__
-    int touch_on = 1;
-#else
-    int touch_on = getenv("PTG_TOUCH") != NULL;
-#endif
     touch_init(touch_send);
+
+    /* settings, kept on the writable drive */
+    Settings settings = { FILTER_SHARP, 0 };
+#ifdef __ANDROID__
+    settings.touch = 1;
+#else
+    settings.touch = getenv("PTG_TOUCH") != NULL;
+#endif
+    char cfg[600];
+#ifdef _WIN32
+    _mkdir(g_c_root);
+#else
+    mkdir(g_c_root, 0755);
+#endif
+    snprintf(cfg, sizeof cfg, "%s/ptgdroid.cfg", g_c_root);
+    settings_load(&settings, cfg);
+    if (getenv("PTG_FILTER")) settings.filter = atoi(getenv("PTG_FILTER")) % FILTER_COUNT;
+
+    /* The start menu is skipped for scripted test runs. */
+    Menu menu = { MENU_CLOSED };
+    int game_started = 0;
+    if (ntaps) {
+        SDL_CreateThreadWithStackSize(game_thread, "guest", 8 << 20, NULL);
+        game_started = 1;
+    } else {
+        menu_open(&menu, MENU_START);
+    }
+    uint32_t t0 = SDL_GetTicks();
     int shot_at = getenv("PTG_SHOT") ? atoi(getenv("PTG_SHOT")) : 0;
     int background = 0, redraw = 1;
 
     for (int running = 1; running;) {
-        run_script(SDL_GetTicks() - t0);
+        uint32_t now = SDL_GetTicks() - t0;
+        run_script(now);
+        if (shot_at && now >= (uint32_t)shot_at) redraw = 1;
+        if (script_menu_request == 1 && menu.mode == MENU_CLOSED) {
+            menu_open(&menu, MENU_PAUSE);
+            input_focus(0);
+            redraw = 1;
+        } else if (script_menu_request == 2 && menu.mode == MENU_PAUSE) {
+            menu.mode = MENU_CLOSED;
+            input_focus(1);
+            redraw = 1;
+        }
+        script_menu_request = 0;
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, 4)) {
             do {
-                if (touch_on) {
-                    int ow, oh;
-                    SDL_GetRendererOutputSize(ren, &ow, &oh);
-                    int ww, wh;
-                    SDL_GetWindowSize(win, &ww, &wh);
+                int ow, oh, ww, wh;
+                SDL_GetRendererOutputSize(ren, &ow, &oh);
+                SDL_GetWindowSize(win, &ww, &wh);
+                if (e.type == SDL_QUIT) { running = 0; break; }
+                if (e.type == SDL_RENDER_TARGETS_RESET || e.type == SDL_RENDER_DEVICE_RESET) {
+                    video_init(ren);
+                    redraw = 1;
+                    continue;
+                }
+                if (e.type == SDL_CONTROLLERDEVICEADDED) { SDL_GameControllerOpen(e.cdevice.which); continue; }
+                if (e.type == SDL_APP_WILLENTERBACKGROUND) { background = 1; input_focus(0); continue; }
+                if (e.type == SDL_APP_DIDENTERFOREGROUND) {
+                    background = 0;
+                    redraw = 1;
+                    if (menu.mode == MENU_CLOSED) input_focus(1);
+                    continue;
+                }
+                if (e.type == SDL_WINDOWEVENT) {
+                    redraw = 1;
+                    if (ntaps || menu.mode != MENU_CLOSED) continue;
+                    if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) input_focus(0);
+                    if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) input_focus(1);
+                    continue;
+                }
+
+                if (menu.mode != MENU_CLOSED) {
+                    int act = menu_event(&menu, &settings, &e, ow, oh, ww, wh);
+                    if (act != MENU_ACT_NONE) redraw = 1;
+                    if (act == MENU_ACT_CHANGED) settings_save(&settings, cfg);
+                    if (act == MENU_ACT_START) {
+                        menu.mode = MENU_CLOSED;
+                        SDL_CreateThreadWithStackSize(game_thread, "guest", 8 << 20, NULL);
+                        game_started = 1;
+                    } else if (act == MENU_ACT_RESUME) {
+                        menu.mode = MENU_CLOSED;
+                        input_focus(1);
+                    } else if (act == MENU_ACT_QUIT) {
+                        running = 0;
+                    }
+                    continue;
+                }
+
+                /* in game: Android back / Escape / gamepad guide pauses and opens the menu */
+                if ((e.type == SDL_KEYDOWN && (e.key.keysym.scancode == SDL_SCANCODE_AC_BACK ||
+                                               e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) ||
+                    (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE)) {
+                    menu_open(&menu, MENU_PAUSE);
+                    input_focus(0);
+                    redraw = 1;
+                    continue;
+                }
+                if (settings.touch) {
                     SDL_Event t = e;
                     if (t.type == SDL_MOUSEBUTTONDOWN || t.type == SDL_MOUSEBUTTONUP) {
                         t.button.x = t.button.x * ow / (ww ? ww : 1);
@@ -265,30 +355,20 @@ int main(int argc, char **argv) {
                     if (touch_event(&t, ow, oh)) { redraw = 1; continue; }
                 }
                 switch (e.type) {
-                case SDL_QUIT: running = 0; break;
                 case SDL_KEYDOWN: case SDL_KEYUP:
                     if (!e.key.repeat) send_nkey(map_key(e.key.keysym.scancode), e.type == SDL_KEYDOWN);
                     break;
-                case SDL_CONTROLLERDEVICEADDED: SDL_GameControllerOpen(e.cdevice.which); break;
                 case SDL_CONTROLLERBUTTONDOWN: case SDL_CONTROLLERBUTTONUP:
                     send_nkey(map_button(e.cbutton.button), e.type == SDL_CONTROLLERBUTTONDOWN);
                     break;
-                case SDL_WINDOWEVENT:
-                    redraw = 1;
-                    if (ntaps) break; /* scripted runs control focus themselves */
-                    if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) input_focus(0);
-                    if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) input_focus(1);
-                    break;
-                case SDL_APP_WILLENTERBACKGROUND: background = 1; input_focus(0); break;
-                case SDL_APP_DIDENTERFOREGROUND: background = 0; redraw = 1; input_focus(1); break;
                 default: break;
                 }
-            } while (SDL_PollEvent(&e));
+            } while (running && SDL_PollEvent(&e));
         }
         SDL_LockMutex(fb_lock);
         int dirty = fb_dirty;
         if (dirty) {
-            SDL_UpdateTexture(tex, NULL, fb_copy, W * 2);
+            video_upload(fb_copy);
             fb_dirty = 0;
         }
         SDL_UnlockMutex(fb_lock);
@@ -296,17 +376,18 @@ int main(int argc, char **argv) {
             int ow, oh;
             SDL_GetRendererOutputSize(ren, &ow, &oh);
             SDL_Rect game;
-            if (touch_on) {
+            if (settings.touch) {
                 touch_layout(ow, oh, &game);
             } else {
-                float s = fminf((float)ow / W, (float)oh / H);
-                game.w = (int)(W * s); game.h = (int)(H * s);
+                float sc = fminf((float)ow / W, (float)oh / H);
+                game.w = (int)(W * sc); game.h = (int)(H * sc);
                 game.x = (ow - game.w) / 2; game.y = (oh - game.h) / 2;
             }
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
             SDL_RenderClear(ren);
-            SDL_RenderCopy(ren, tex, NULL, &game);
-            if (touch_on) touch_draw(ren);
+            if (game_started) video_draw(ren, settings.filter, game);
+            if (settings.touch && game_started && menu.mode == MENU_CLOSED) touch_draw(ren);
+            if (menu.mode != MENU_CLOSED) menu_draw(&menu, &settings, ren, ow, oh);
             if (shot_at && SDL_GetTicks() - t0 >= (uint32_t)shot_at) {
                 SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 24, SDL_PIXELFORMAT_BGR24);
                 SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_BGR24, surf->pixels, surf->pitch);
